@@ -6580,6 +6580,10 @@ export interface TypeParameter extends InstantiableType {
     resolvedDefaultType?: Type;
 }
 
+export interface QueryTypeParameter extends TypeParameter {
+    exprName: EntityName;
+}
+
 /** @internal */
 export const enum AccessFlags {
     None = 0,

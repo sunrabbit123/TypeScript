@@ -900,6 +900,7 @@ import {
     PunctuationSyntaxKind,
     pushIfUnique,
     QualifiedName,
+    QueryTypeParameter,
     QuestionToken,
     rangeEquals,
     rangeOfNode,
@@ -951,6 +952,7 @@ import {
     skipTrivia,
     skipTypeChecking,
     some,
+    // SomeRandomType,
     SourceFile,
     SpreadAssignment,
     SpreadElement,
@@ -6480,6 +6482,9 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                 return (type as TypeReference).node ? visitAndTransformType(type as TypeReference, typeReferenceToTypeNode) : typeReferenceToTypeNode(type as TypeReference);
             }
             if (type.flags & TypeFlags.TypeParameter || objectFlags & ObjectFlags.ClassOrInterface) {
+                if (isQueryTypeParameter(type)) {
+                    return factory.createTypeQueryNode(type.exprName);
+                }
                 if (type.flags & TypeFlags.TypeParameter && contains(context.inferTypeParameters, type)) {
                     context.approximateLength += (symbolName(type.symbol).length + 6);
                     let constraintNode: TypeNode | undefined;
@@ -11565,6 +11570,13 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
 
     // Return the outer type parameters of a node or undefined if the node has no outer type parameters.
     function getOuterTypeParameters(node: Node, includeThisTypes?: boolean): TypeParameter[] | undefined {
+        const typeParameters = getOuterTypeParametersWorker(node, includeThisTypes);
+        const queryTypeParameters = getTypeQueryParameters(node);
+        return concatenate(typeParameters, queryTypeParameters);
+    }
+
+    // Return the outer type parameters of a node or undefined if the node has no outer type parameters.
+    function getOuterTypeParametersWorker(node: Node, includeThisTypes?: boolean): TypeParameter[] | undefined {
         while (true) {
             node = node.parent; // TODO: GH#18217 Use SourceFile kind check instead
             if (node && isBinaryExpression(node)) {
@@ -11628,6 +11640,19 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                 }
             }
         }
+    }
+
+    function getTypeQueryParameters(node: Node): QueryTypeParameter[] | undefined {
+        let queryTypeParameters: QueryTypeParameter[] | undefined;
+        visitNode(node, visitor);
+
+        function visitor(node: Node): Node | readonly Node[] | undefined {
+            if (isTypeQueryNode(node)) {
+                (queryTypeParameters || (queryTypeParameters = [])).push(getTypeParameterFromTypeQueryNode(node));
+            }
+            return visitEachChild(node, visitor, nullTransformationContext);
+        }
+        return queryTypeParameters;
     }
 
     // The outer type parameters are those defined by enclosing generic classes, methods, or functions.
@@ -15616,16 +15641,56 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
     }
 
     function getTypeFromTypeQueryNode(node: TypeQueryNode): Type {
+        // const links = getNodeLinks(node);
+        // if (!links.resolvedType) {
+        //     // TypeScript 1.0 spec (April 2014): 3.6.3
+        //     // The expression is processed as an identifier expression (section 4.3)
+        //     // or property access expression(section 4.10),
+        //     // the widened type(section 3.9) of which becomes the result.
+        //     const type = checkExpressionWithTypeArguments(node);
+        //     const resolvedType = getRegularTypeOfLiteralType(getWidenedType(type));
+        //     // const delayedType = createType(TypeFlags.Any) as SomeRandomType; // >> TODO: would need a new typeflag + new type of type?
+        //     // delayedType.randomBase = resolvedType;
+        //     // delayedType.exprName = node.exprName;
+        //     links.resolvedType = resolvedType;
+        //     // links.resolvedType = delayedType;
+        // }
+        // return links.resolvedType;
+        // const type = checkExpressionWithTypeArguments(node);
+        // return getRegularTypeOfLiteralType(getWidenedType(type));
         const links = getNodeLinks(node);
         if (!links.resolvedType) {
             // TypeScript 1.0 spec (April 2014): 3.6.3
             // The expression is processed as an identifier expression (section 4.3)
             // or property access expression(section 4.10),
             // the widened type(section 3.9) of which becomes the result.
-            const type = checkExpressionWithTypeArguments(node);
-            links.resolvedType = getRegularTypeOfLiteralType(getWidenedType(type));
+            // const type = checkExpressionWithTypeArguments(node);
+            // const resolvedType = getRegularTypeOfLiteralType(getWidenedType(type));
+            // // const delayedType = createType(TypeFlags.Any) as SomeRandomType; // >> TODO: would need a new typeflag + new type of type?
+            // // delayedType.randomBase = resolvedType;
+            // // delayedType.exprName = node.exprName;
+            // const tp = createTypeParameter() as QueryTypeParameter;
+            // tp.constraint = resolvedType;
+            // tp.exprName = node.exprName;
+            // links.resolvedType = tp;
+            getTypeParameterFromTypeQueryNode(node);
         }
-        return links.resolvedType;
+        if (!(links.resolvedType as QueryTypeParameter).constraint) {
+            const type = checkExpressionWithTypeArguments(node);
+            const resolvedType = getRegularTypeOfLiteralType(getWidenedType(type));
+            (links.resolvedType as QueryTypeParameter).constraint = resolvedType;
+        }
+        return links.resolvedType!;
+    }
+
+    function getTypeParameterFromTypeQueryNode(node: TypeQueryNode): QueryTypeParameter {
+        const links = getNodeLinks(node);
+        if (!links.resolvedType) {
+            const tp = createTypeParameter() as QueryTypeParameter;
+            tp.exprName = node.exprName;
+            links.resolvedType = tp;
+        }
+        return links.resolvedType as QueryTypeParameter;
     }
 
     function getTypeOfGlobalSymbol(symbol: Symbol | undefined, arity: number): ObjectType {
@@ -27676,7 +27741,7 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
         // 'string | undefined' to give control flow analysis the opportunity to narrow to type 'string'.
         const substituteConstraints = !(checkMode && checkMode & CheckMode.Inferential) &&
             someType(type, isGenericTypeWithUnionConstraint) &&
-            (isConstraintPosition(type, reference) || hasContextualTypeWithNoGenericTypes(reference, checkMode));
+            ((reference.flags & NodeFlags.Synthesized) || isConstraintPosition(type, reference) || hasContextualTypeWithNoGenericTypes(reference, checkMode)); // >> TODO: find some other way to signal this
         return substituteConstraints ? mapType(type, getBaseConstraintOrType) : type;
     }
 
@@ -42216,6 +42281,8 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
 
         const signature = getSignatureFromDeclaration(container);
         const returnType = getReturnTypeOfSignature(signature);
+        // >> TODO: gotta instantiate the return type
+        // >> TODO: gotta put an instantiate type
         const functionFlags = getFunctionFlags(container);
         if (strictNullChecks || node.expression || returnType.flags & TypeFlags.Never) {
             const exprType = node.expression ? checkExpressionCached(node.expression) : undefinedType;
@@ -42238,7 +42305,21 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                     // If the function has a return type, but promisedType is
                     // undefined, an error will be reported in checkAsyncFunctionReturnType
                     // so we don't need to report one here.
-                    checkTypeAssignableToAndOptionallyElaborate(unwrappedExprType, unwrappedReturnType, node, node.expression);
+                    // const queryTypeParameters = collectQueryTypeParameters(unwrappedReturnType);
+                    const queryTypeParameters = collectQueryTypeParameters(container.type);
+                    // >> TODO: is `checkExpression` gonna return the narrowed thing? Not immediately, need to fake narrowable node.
+                    const mapper = createTypeMapper(queryTypeParameters, queryTypeParameters.map(tp => {
+                        const originalName = tp.exprName;
+                        const fakeName = factory.cloneNode(originalName);
+                        setParent(fakeName, node.parent);
+                        setNodeFlags(fakeName, fakeName.flags | NodeFlags.Synthesized);
+                        fakeName.flowNode = (node.flowNode as FlowAssignment | undefined)?.antecedent;
+                        fakeName.flowNode = node.flowNode;
+                        return checkExpression(fakeName);
+                    }));
+                    const actualReturnType = instantiateType(unwrappedReturnType, mapper);
+                    // checkTypeAssignableToAndOptionallyElaborate(unwrappedExprType, unwrappedReturnType, node, node.expression);
+                    checkTypeAssignableToAndOptionallyElaborate(unwrappedExprType, actualReturnType, node, node.expression);
                 }
             }
         }
@@ -42246,6 +42327,50 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
             // The function has a return type, but the return statement doesn't have an expression.
             error(node, Diagnostics.Not_all_code_paths_return_a_value);
         }
+
+        // function collectQueryTypeParameters(type: Type): QueryTypeParameter[] {
+        function collectQueryTypeParameters(node: Node | undefined): QueryTypeParameter[] {
+            if (!node) return [];
+            return (getOuterTypeParameters(node) || []).filter(isQueryTypeParameter);
+            // // >> TODO: need to reduce the type first?
+            // const flags = type.flags;
+            // if (flags & TypeFlags.TypeParameter) {
+            //     if (isQueryTypeParameter(type)) {
+            //         return [type];
+            //     }
+            //     // >> TODO: deal with non-query type parameter
+            //     return [];
+            // }
+            // if (flags & TypeFlags.Object) {
+            //     // const t = type as ObjectType;
+            //     // >> TODO: deal with object types
+            //     return [];
+            // }
+            // if (flags & TypeFlags.UnionOrIntersection) {
+            //     return (type as UnionOrIntersectionType).types.flatMap(collectQueryTypeParameters);
+            // }
+
+            // // >> TODO: Copy from `instantiateTypeWorker`?
+            // if (flags & TypeFlags.IndexedAccess) {
+            //     return [...collectQueryTypeParameters((type as IndexedAccessType).objectType), ...collectQueryTypeParameters((type as IndexedAccessType).indexType)];
+            //     // const newAliasSymbol = aliasSymbol || type.aliasSymbol;
+            //     // const newAliasTypeArguments = aliasSymbol ? aliasTypeArguments : instantiateTypes(type.aliasTypeArguments, mapper);
+            //     // return getIndexedAccessType(instantiateType((type as IndexedAccessType).objectType, mapper), instantiateType((type as IndexedAccessType).indexType, mapper), (type as IndexedAccessType).accessFlags, /*accessNode*/ undefined, newAliasSymbol, newAliasTypeArguments);
+            // }
+            // if (flags & TypeFlags.Conditional) {
+            //     return [
+            //         ...collectQueryTypeParameters((type as ConditionalType).checkType),
+            //         ...collectQueryTypeParameters((type as ConditionalType).extendsType),
+            //         ...collectQueryTypeParameters(getTrueTypeFromConditionalType(type as ConditionalType)),
+            //         ...collectQueryTypeParameters(getFalseTypeFromConditionalType(type as ConditionalType)),
+            //     ];
+            // }
+            // return [];
+        }
+    }
+
+    function isQueryTypeParameter(type: Type): type is QueryTypeParameter {
+        return !!(type.flags & TypeFlags.TypeParameter) && !!(type as QueryTypeParameter).exprName;
     }
 
     function checkWithStatement(node: WithStatement) {
