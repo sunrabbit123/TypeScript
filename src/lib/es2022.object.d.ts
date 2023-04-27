@@ -4,5 +4,5 @@ interface ObjectConstructor {
      * @param o An object.
      * @param v A property name.
      */
-    hasOwn(o: object, v: PropertyKey): boolean;
+    hasOwn<T extends {}, K extends string>(o: T, v: K): o is T & { [key in K]: unknown};
 }
